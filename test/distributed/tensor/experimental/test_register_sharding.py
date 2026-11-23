@@ -183,6 +183,42 @@ class TestRegisterSharding(DTensorTestBase):
         self.assertIsInstance(result, DTensor)
         self.assertEqual(result.full_tensor(), x)
 
+    @with_comms
+    def test_register_sharding_overrides_decomposition_handler(self):
+        # mse_loss normally runs its decomposition through a custom op handler;
+        # a registered strategy must still take effect.
+        calls = []
+
+        def replicate_all(*args):
+            specs = [Replicate() if isinstance(a, DTensorSpec) else None for a in args]
+            return [([Replicate()], specs)]
+
+        @register_sharding(aten.mse_loss.default)
+        def mse_loss_sharding(*args):
+            calls.append("forward")
+            return replicate_all(*args)
+
+        @register_sharding(aten.mse_loss_backward.default)
+        def mse_loss_backward_sharding(*args):
+            calls.append("backward")
+            return replicate_all(*args)
+
+        mesh = self.build_device_mesh()
+        x = torch.randn(2 * self.world_size, 3, device=self.device_type)
+        target = torch.randn(2 * self.world_size, 3, device=self.device_type)
+        ref_x = x.clone().requires_grad_()
+        ref = torch.nn.functional.mse_loss(ref_x, target)
+        ref.backward()
+
+        dist_x = distribute_tensor(x, mesh, [Shard(0)]).requires_grad_()
+        dist_target = distribute_tensor(target, mesh, [Shard(0)])
+        out = torch.nn.functional.mse_loss(dist_x, dist_target)
+        out.backward()
+
+        self.assertEqual(calls, ["forward", "backward"])
+        self.assertEqual(out.full_tensor(), ref)
+        self.assertEqual(dist_x.grad.full_tensor(), ref_x.grad)
+
 
 if __name__ == "__main__":
     run_tests()

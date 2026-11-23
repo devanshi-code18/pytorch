@@ -158,6 +158,12 @@ class DecompShardingStrategy:
     For each candidate input placement combination, runs the decomposition on meta
     tensors under PlacementTrackingMode to determine the output placement. These
     single-dimension strategies are then expanded to the full mesh.
+
+    The op itself, not its decomposition, then runs on each local shard, so a
+    strategy is only valid if the op's kernel computes on a shard what its
+    decomposition computes on the global tensor. Kernels that read global shape
+    information (e.g. dividing by numel for a mean reduction) break this; such ops
+    need a strategy or a custom op handler (see _DECOMPOSE_ON_DTENSOR_OPS).
     """
 
     def __init__(self, sharding_prop: ShardingPropagator):
@@ -165,8 +171,9 @@ class DecompShardingStrategy:
         # Cache fake meshes per device type to avoid repeated allocation.
         # A fake size-1 mesh ensures identical strategy computation across all ranks
         # during decomposition tracing, avoiding potential SPMD divergence.
-        # False negatives are avoided (all sizes % 1 == 0), while false positives
-        # are caught on expansion to the real, multi-dim device mesh.
+        # False negatives are avoided (all sizes % 1 == 0). Full-mesh strategy
+        # filters of the decomposed ops (e.g. mean's even-sharding check) only see
+        # this size-1 mesh, so they never reject a placement.
         self._fake_meshes: dict[str, DeviceMesh] = {}
 
     def _get_fake_mesh(self, device_type: str) -> DeviceMesh:

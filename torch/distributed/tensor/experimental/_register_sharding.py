@@ -6,6 +6,7 @@ from functools import partial
 import torch
 from torch._ops import OpOverload
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor._dispatch import decomposition_handler
 from torch.distributed.tensor._op_schema import (
     OpSchema,
     OpStrategy,
@@ -124,12 +125,18 @@ def register_sharding(op: OpOverload | list[OpOverload]):
             )
 
         overloads = op if isinstance(op, list) else [op]
+        handlers = DTensor._op_dispatcher._custom_op_handlers
         for overload in overloads:
             DTensor._op_dispatcher.sharding_propagator.register_op_strategy(
                 overload,
                 partial(custom_strategy, custom_sharding_fn),
                 derive_schema_info(overload),
             )
+            # Custom op handlers run before sharding propagation. Drop the
+            # decomposition handler some losses use (see _DECOMPOSE_ON_DTENSOR_OPS)
+            # so that this strategy takes effect for them.
+            if handlers.get(overload) is decomposition_handler:
+                del handlers[overload]
 
         return custom_sharding_fn
 

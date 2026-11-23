@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.tensor._api as dtensor
 import torch.distributed.tensor._random as random
+from torch._decomp import decomposition_table
 from torch._library.utils import fill_defaults
 from torch._logging import LazyString
 from torch._prims.rng_prims import run_dtensor_rng_op
@@ -192,6 +193,39 @@ def found_inf_reduce_handler(
     target_tensor.copy_(found_inf)
 
 
+# DecompShardingStrategy picks placements by tracing an op's decomposition on a
+# size-1 mesh, then runs the fused kernel on each local shard. For these losses that
+# is wrong with reduction="mean": the *_backward kernels divide by the local numel,
+# and mean's uneven-shard filter only ever sees the size-1 mesh. So run the
+# decomposition on the DTensors instead. binary_cross_entropy's forward is not
+# listed: its decomposition-derived strategy replicates the inputs and is correct.
+_DECOMPOSE_ON_DTENSOR_OPS = [
+    cast(torch._ops.OpOverload, overload)
+    for packet in (
+        aten.binary_cross_entropy_backward,
+        aten.binary_cross_entropy_with_logits,
+        aten.huber_loss,
+        aten.huber_loss_backward,
+        aten.mse_loss,
+        aten.mse_loss_backward,
+        aten.smooth_l1_loss,
+        aten.smooth_l1_loss_backward,
+        aten.soft_margin_loss,
+        aten.soft_margin_loss_backward,
+    )
+    for overload in packet.op_overloads()
+    if overload in decomposition_table
+]
+
+
+def decomposition_handler(
+    op_call: torch._ops.OpOverload,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> object:
+    return decomposition_table[op_call](*args, **kwargs)
+
+
 class OpDispatcher:
     """
     Op dispatching class instance to handle args/kwargs pre-processing (un-wrapping), sharding
@@ -237,6 +271,7 @@ class OpDispatcher:
             aten.as_strided.default: as_strided_handler,
             aten.argmin.default: argminmax_handler,
             aten.argmax.default: argminmax_handler,
+            **dict.fromkeys(_DECOMPOSE_ON_DTENSOR_OPS, decomposition_handler),
         }
 
     # ********************************************************************************************

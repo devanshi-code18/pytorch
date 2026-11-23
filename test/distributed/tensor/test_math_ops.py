@@ -363,6 +363,55 @@ class DistMathOpsTest(DTensorContinuousTestBase):
             self.assertEqual(dist_x.grad.full_tensor(), x.grad)
 
     @with_comms
+    @parametrize(
+        "loss_name",
+        [
+            "binary_cross_entropy",
+            "binary_cross_entropy_with_logits",
+            "huber_loss",
+            "mse_loss",
+            "smooth_l1_loss",
+            "soft_margin_loss",
+        ],
+    )
+    def test_pointwise_loss_mean_on_sharded_input(self, loss_name):
+        device_mesh = self.build_device_mesh()
+        loss_fn = getattr(torch.nn.functional, loss_name)
+        for rows in (2 * self.world_size, 3 * self.world_size - 1):
+            x = torch.randn(rows, 3, device=self.device_type, dtype=torch.float64)
+            target = torch.rand(rows, 3, device=self.device_type, dtype=torch.float64)
+            if loss_name == "binary_cross_entropy":
+                x = x.sigmoid()
+            elif loss_name == "soft_margin_loss":
+                target = target.round() * 2 - 1
+            for reduction in ("mean", "sum", "none"):
+                ref_x = x.clone().requires_grad_()
+                ref = loss_fn(ref_x, target, reduction=reduction)
+                ref.sum().backward()
+
+                dist_x = distribute_tensor(x, device_mesh, [Shard(0)])
+                dist_x.requires_grad_()
+                dist_target = distribute_tensor(target, device_mesh, [Shard(0)])
+                out = loss_fn(dist_x, dist_target, reduction=reduction)
+                out.sum().backward()
+                msg = f"rows={rows} reduction={reduction}"
+                self.assertEqual(out.full_tensor(), ref, msg=msg)
+                self.assertEqual(dist_x.grad.full_tensor(), ref_x.grad, msg=msg)
+
+    @with_comms
+    def test_binary_cross_entropy_domain_check(self):
+        if self.device_type != "cpu":
+            self.skipTest("CUDA BCE checks its domain with a device-side assert")
+        device_mesh = self.build_device_mesh()
+        x = torch.rand(2 * self.world_size, 3, device=self.device_type)
+        target = torch.rand(2 * self.world_size, 3, device=self.device_type)
+        x[0, 0] = 1.5
+        dist_x = distribute_tensor(x, device_mesh, [Shard(0)])
+        dist_target = distribute_tensor(target, device_mesh, [Shard(0)])
+        with self.assertRaisesRegex(RuntimeError, "between 0 and 1"):
+            torch.nn.functional.binary_cross_entropy(dist_x, dist_target).full_tensor()
+
+    @with_comms
     @skip_unless_torch_gpu
     def test_nll_loss_and_cross_entropy(self):
         device_mesh = self.build_device_mesh()

@@ -1,11 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates
 # Owner(s): ["oncall: distributed"]
 
+from unittest.mock import patch
+
 import torch
 import torch.distributed as dist
 from torch._decomp import register_decomposition
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import distribute_tensor, DTensor
+from torch.distributed.tensor._dispatch import (
+    _DECOMPOSE_ON_DTENSOR_OPS,
+    decomposition_handler,
+)
 from torch.distributed.tensor.placement_types import (
     _StridedShard,
     Partial,
@@ -131,6 +137,48 @@ class TestDecompSharding(TestCase):
             cache = _get_python_sharding_prop_cache_info()
             self.assertEqual(cache_size, cache.currsize)
 
+    def test_decompose_on_dtensor_ops(self):
+        self.assertEqual(
+            sorted(str(op) for op in _DECOMPOSE_ON_DTENSOR_OPS),
+            [
+                "aten.binary_cross_entropy_backward.default",
+                "aten.binary_cross_entropy_backward.grad_input",
+                "aten.binary_cross_entropy_with_logits.default",
+                "aten.binary_cross_entropy_with_logits.out",
+                "aten.huber_loss.default",
+                "aten.huber_loss.out",
+                "aten.huber_loss_backward.default",
+                "aten.huber_loss_backward.out",
+                "aten.mse_loss.default",
+                "aten.mse_loss.out",
+                "aten.mse_loss_backward.default",
+                "aten.mse_loss_backward.grad_input",
+                "aten.smooth_l1_loss.default",
+                "aten.smooth_l1_loss.out",
+                "aten.smooth_l1_loss_backward.default",
+                "aten.smooth_l1_loss_backward.grad_input",
+                "aten.soft_margin_loss.default",
+                "aten.soft_margin_loss.out",
+                "aten.soft_margin_loss_backward.default",
+                "aten.soft_margin_loss_backward.grad_input",
+            ],
+        )
+        handlers = DTensor._op_dispatcher._custom_op_handlers
+        for op in _DECOMPOSE_ON_DTENSOR_OPS:
+            self.assertIs(handlers[op], decomposition_handler)
+
+    # Some of the losses below normally run their decomposition through a custom op
+    # handler. Drop those handlers here so that they still exercise the strategy
+    # DecompShardingStrategy derives, which is what this test covers.
+    @patch.dict(
+        DTensor._op_dispatcher._custom_op_handlers,
+        {
+            op: handler
+            for op, handler in DTensor._op_dispatcher._custom_op_handlers.items()
+            if op not in _DECOMPOSE_ON_DTENSOR_OPS
+        },
+        clear=True,
+    )
     def test_misc_ops_with_no_sharding_rules(self):
         """miscellaneous aten ops"""
         from torch.distributed.tensor import empty as d_empty
@@ -145,6 +193,7 @@ class TestDecompSharding(TestCase):
             self.assertTrue(op not in sharding_prop.op_strategy_funcs)
             self.assertTrue(op not in sharding_prop.op_single_dim_strategy_funcs)
             self.assertTrue(op not in sharding_prop.op_to_rules)
+            self.assertTrue(op not in DTensor._op_dispatcher._custom_op_handlers)
 
         # binary_cross_entropy_with_logits
         check_no_strategy(aten.binary_cross_entropy_with_logits.default)
