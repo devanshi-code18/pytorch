@@ -1490,7 +1490,6 @@ static py::object make_output_sharding(
 static py::object mesh_cache_key(py::handle mesh) {
   if (Py_TYPE(mesh.ptr()) ==
       reinterpret_cast<PyTypeObject*>(get_fake_script_object_class().ptr())) {
-
     return mesh.attr("real_obj").attr("_cache_key");
   }
   return mesh.attr("_cache_key");
@@ -2857,7 +2856,7 @@ static std::optional<NativeOpSchemaAndMeshes> create_native_op_schema(
   }
 
   for (const auto& mesh : meshes) {
-    comparison_key_hash = 
+    comparison_key_hash =
         hash_combine(comparison_key_hash, static_cast<size_t>(py::hash(mesh)));
     comparison_key.emplace_back(mesh_cache_key(mesh));
   }
