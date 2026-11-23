@@ -224,6 +224,12 @@ class SIMDKernelFeatures:
         # conservative here.
         total_numel = self.numel * self.reduction_numel
 
+        grid_split = self.get_grid_split()
+        if grid_split:
+            total_numel = self.numel * ir.grid_split_chunk(
+                self.reduction_numel, grid_split
+            )
+
         from .simd import SIMDScheduling
 
         if SIMDScheduling.can_use_32bit_indexing(total_numel, buffers):
@@ -334,6 +340,22 @@ class SIMDKernelFeatures:
         else:
             reduction_hint_val = ReductionHint.DEFAULT
         return reduction_hint_val
+
+    def get_grid_split(self) -> int | None:
+        grid_splits: OrderedSet[int | None] = OrderedSet()
+        for n in self.reduction_nodes():
+            grid_splits.add(
+                n.node._grid_split_factor
+                if isinstance(n.node, ir.ComputedBuffer)
+                else None
+            )
+
+        if len(grid_splits) > 1:
+            raise AssertionError(
+                "fused reductions must use one consistent grid split factor, "
+                f"got {grid_splits}"
+            )
+        return next(iter(grid_splits), None)
 
     @cache_on_self
     def buffer_read_counts(self) -> dict[str, int]:

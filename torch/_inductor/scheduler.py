@@ -108,6 +108,16 @@ from .virtualized import V
 log = logging.getLogger(__name__)
 
 
+def _has_grid_split(node: BaseSchedulerNode) -> bool:
+    return any(
+        isinstance(n, SchedulerNode)
+        and isinstance(n.node, ComputedBuffer)
+        and n.node._grid_split_factor is not None
+        for n in node.get_nodes()
+        if n.is_reduction()
+    )
+
+
 def _real_dep_names(deps: OrderedSet[Dep]) -> OrderedSet[str]:
     """Names of real reads/writes, excluding WeakDep (ordering-only deps that
     do not actually read or write the buffer)."""
@@ -470,6 +480,8 @@ class MixOrderReduction:
         Check whether we can fuse two reductions with mix loop orders.
         """
         if not config.triton.mix_order_reduction:
+            return False
+        if _has_grid_split(node1) or _has_grid_split(node2):
             return False
 
         # TODO: Mix order reduction is not supported with cpp_wrapper yet
@@ -2487,6 +2499,8 @@ class NestedReduction:
 
     @classmethod
     def can_fuse(cls, node1: BaseSchedulerNode, node2: BaseSchedulerNode) -> bool:
+        if _has_grid_split(node1) or _has_grid_split(node2):
+            return False
         return cls.plan(node1, node2) is not None
 
     @classmethod
