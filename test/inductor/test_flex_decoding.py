@@ -1685,6 +1685,30 @@ def forward(self, arg0_1, arg1_1, arg2_1, arg3_1, arg4_1):
 
     @supported_platform
     @skip_on_cpu
+    @torch._inductor.config.patch(deterministic=True)
+    def test_decode_no_block_mask_splits_kv(self, device):
+        # block_mask=None is a single 2**30-token sparse block. Its KV range must still
+        # be divided across SPLIT_KV like an explicit all-True mask with partial blocks,
+        # which goes through the same template branch. deterministic keeps autotuning
+        # from picking different combine-kernel configs for the two compiles.
+        Hq, Hkv, KV_S, D = 16, 2, 2048, 64
+        q = torch.randn(1, Hq, 1, D, device=device)
+        k = torch.randn(1, Hkv, KV_S, D, device=device)
+        v = torch.randn(1, Hkv, KV_S, D, device=device)
+        n = KV_S // 128
+        block_mask = BlockMask.from_kv_blocks(
+            torch.full((1, 1, 1), n, dtype=torch.int32, device=device),
+            torch.arange(n, dtype=torch.int32, device=device).view(1, 1, 1, n),
+            BLOCK_SIZE=128,
+            seq_lengths=(1, KV_S),
+        )
+        flex = torch.compile(flex_attention)
+        out = flex(q, k, v, enable_gqa=True)
+        out_mask = flex(q, k, v, block_mask=block_mask, enable_gqa=True)
+        self.assertEqual(out, out_mask, atol=0, rtol=0)
+
+    @supported_platform
+    @skip_on_cpu
     def test_mixed_dtypes(self, device):
         dtype_high = torch.float16 if PLATFORM_SUPPORTS_FP8 else torch.float32
         dtype_low = e4m3_type if PLATFORM_SUPPORTS_FP8 else torch.float16

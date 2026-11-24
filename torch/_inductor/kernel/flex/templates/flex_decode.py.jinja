@@ -124,7 +124,9 @@
         # https://github.com/vllm-project/vllm/blob/61249b177de1566027fc74e9b51b45a4c973eb47/vllm/v1/attention/backends/flex_attention.py#L615-L616
         TILE_KV_OG = tl.cdiv(KV_LEN, SPLIT_KV)
     else:
-        TILE_KV_OG = tl.cdiv(kv_num_blocks * SPARSE_KV_BLOCK_SIZE, SPLIT_KV)
+        # A sparse block can extend past KV_LEN (block_mask=None is one 2**30-token
+        # block), so only split the part that exists.
+        TILE_KV_OG = tl.cdiv(tl.minimum(kv_num_blocks * SPARSE_KV_BLOCK_SIZE, KV_LEN), SPLIT_KV)
     TILE_KV = tl.cdiv(TILE_KV_OG, BLOCK_N) * BLOCK_N
     TILE_KV_MULTIPLE: tl.constexpr = (TILE_KV // BLOCK_N)
 
