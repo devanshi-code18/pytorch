@@ -11,7 +11,7 @@ from torch._dynamo.device_interface import get_interface_for_device
 from torch._inductor.virtualized import V
 from torch.utils._sympy.functions import FloorDiv, Mod
 
-from ... import ir
+from ... import config, ir
 from ...ir import FixedLayout, FlexibleLayout
 from ...lowering import empty, empty_strided, lowerings
 from ...runtime.runtime_utils import ceildiv, is_power_of_2, next_power_of_2
@@ -282,7 +282,15 @@ def create_flex_decoding_kernel(*args, **kwargs):
 
     kernel_options.setdefault("SM_SCALE", scale)
     if "SPLIT_KV" not in kernel_options:
-        kernel_options["SPLIT_KV"] = get_split_k(B, Hkv, seq_len_kv, device)
+        if config.batch_invariant:
+            # Size the split for B=1 so a row's KV partition doesn't depend on the batch
+            # size. Capping it at 32 keeps the cross-split sum below a persistent
+            # reduction whose hint doesn't depend on the output size (see
+            # Reduction.num_splits), so its config doesn't change with B either.
+            split_kv = min(get_split_k(1, Hkv, seq_len_kv, device), 32)
+        else:
+            split_kv = get_split_k(B, Hkv, seq_len_kv, device)
+        kernel_options["SPLIT_KV"] = split_kv
     MAX_SPLIT_KV = kernel_options["SPLIT_KV"]
 
     # create config dependent intermediate buffers

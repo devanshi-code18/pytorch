@@ -1685,6 +1685,38 @@ def forward(self, arg0_1, arg1_1, arg2_1, arg3_1, arg4_1):
 
     @supported_platform
     @skip_on_cpu
+    @torch._inductor.config.patch(
+        {"batch_invariant": True, "triton.enable_fp_fusion": False}
+    )
+    def test_decode_batch_invariant(self, device):
+        # By default SPLIT_KV depends on the batch size; under batch_invariant a row's
+        # output must not depend on how many other rows are in the batch. FMA
+        # contraction can still change with the kernel config, so it is off here.
+        Bmax, Hq, KV_S, D = 64, 16, 2048, 64
+        kv_len = torch.randint(KV_S // 2, KV_S + 1, (Bmax,), device=device)
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            return kv_idx < kv_len[b]
+
+        # Hkv=1 gets more than 32 splits by default.
+        for Hkv in (8, 1):
+            q = torch.randn(Bmax, Hq, 1, D, device=device)
+            k = torch.randn(Bmax, Hkv, KV_S, D, device=device)
+            v = torch.randn(Bmax, Hkv, KV_S, D, device=device)
+
+            def run(B):
+                torch._dynamo.reset()
+                block_mask = create_block_mask(mask_mod, B, 1, 1, KV_S, device=device)
+                return torch.compile(flex_attention)(
+                    q[:B], k[:B], v[:B], block_mask=block_mask, enable_gqa=True
+                )
+
+            ref = run(Bmax)
+            for B in (1, 3, 8):
+                self.assertEqual(run(B), ref[:B], atol=0, rtol=0)
+
+    @supported_platform
+    @skip_on_cpu
     def test_mixed_dtypes(self, device):
         dtype_high = torch.float16 if PLATFORM_SUPPORTS_FP8 else torch.float32
         dtype_low = e4m3_type if PLATFORM_SUPPORTS_FP8 else torch.float16
