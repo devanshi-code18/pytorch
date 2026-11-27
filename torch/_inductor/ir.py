@@ -1634,6 +1634,15 @@ class Reduction(Loops):
             and reduction_type not in arg_reduction_types
             and config.split_reductions
         )
+        # The split and the DEFAULT shortcut below depend on numel_hint, so under
+        # batch_invariant a row would be reduced in a different order at another
+        # batch size. Row reductions never split and always take their hint from
+        # the strides instead. x.sum() has no rows; scans are left alone.
+        batch_invariant = (
+            config.batch_invariant and len(ranges) > 0 and reduction_type != "scan"
+        )
+        if batch_invariant:
+            should_split = False
 
         if reduction_type == "dot":
             # Don't split when doing native matmul
@@ -1692,9 +1701,8 @@ class Reduction(Loops):
                         # use reduction_sizes of this node or its dependent nodes directly.
                         return ReductionHint.INNER, -1
             return ReductionHint.INNER, split
-        if (
-            reduction_numel_hint <= min_elements_per_thread
-            or numel_hint >= num_sm * 2 * 32
+        if reduction_numel_hint <= min_elements_per_thread or (
+            numel_hint >= num_sm * 2 * 32 and not batch_invariant
         ):
             return ReductionHint.DEFAULT, 1
 

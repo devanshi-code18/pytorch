@@ -232,6 +232,35 @@ class DeterministicTest(TestCase):
             size //= 2
 
     @unittest.skipIf(not HAS_GPU_AND_TRITON, "requires GPU + Triton")
+    @inductor_config.patch(batch_invariant=True)
+    @parametrize("case", ["looped", "split", "outer"])
+    def test_reduction_batch_invariance(self, case):
+        # Configs that used to follow the batch size:
+        #   looped: with 10 loads, R0_BLOCK drops 2048 -> 1024 at 1024 rows
+        #   split: long rows are split in two only when there are few rows
+        #   outer: with many rows, the OUTER reduction hint becomes DEFAULT
+        fn, shape, num_inputs = {
+            "looped": (lambda *xs: sum(xs).pow(2).sum(-1), (1024, 2048), 10),
+            "split": (lambda x: x.pow(2).sum(-1), (512, 65536), 1),
+            "outer": (lambda x: x.mean(1), (64, 64, 1024), 1),
+        }[case]
+        torch.manual_seed(0)
+        inputs = [torch.randn(shape, device=GPU_TYPE) for _ in range(num_inputs)]
+
+        torch._dynamo.reset()
+        out_full = torch.compile(fn)(*inputs)
+        size = shape[0] // 2
+        while size >= 1:
+            torch._dynamo.reset()
+            out = torch.compile(fn)(*(x[:size] for x in inputs))
+            self.assertEqual(
+                out_full[:size].view(torch.int32),
+                out.view(torch.int32),
+                msg=f"rows diverged at batch size {size}",
+            )
+            size //= 2
+
+    @unittest.skipIf(not HAS_GPU_AND_TRITON, "requires GPU + Triton")
     def test_cumsum_deterministic(self):
         from torch._inductor.utils import run_and_get_code
 

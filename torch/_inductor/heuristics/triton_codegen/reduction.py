@@ -49,6 +49,21 @@ def _get_tiling_scores(
     return inductor_meta.get("tiling_scores") or dict.fromkeys(size_hints, 1)
 
 
+def _batch_invariant_size_hints(
+    size_hints: dict[str, int],
+    inductor_meta: dict[str, Any],
+) -> dict[str, int]:
+    # XBLOCK, R0_BLOCK and num_warps all change the order a row is reduced in,
+    # so under batch_invariant pick them for a fixed row count. no_x_dim kernels
+    # already see x == 1, and hints past the 2**31 - 1 grid limit are kept so
+    # _check_max_grid_x can still grow XBLOCK.
+    if not inductor_meta.get("batch_invariant") or inductor_meta.get("no_x_dim"):
+        return size_hints
+    if "x" not in size_hints or size_hints["x"] >= 2**31:
+        return size_hints
+    return {**size_hints, "x": 4096}
+
+
 def _match_target_block_product(
     size_hints,
     tiling_scores,
@@ -228,6 +243,7 @@ class ReductionHeuristic(CodegenConfigHeuristics):
             triton_native_mm_configs,
         )
 
+        size_hints = _batch_invariant_size_hints(size_hints, inductor_meta)
         reduction_hint = inductor_meta.get("reduction_hint")
         rnumel = get_total_reduction_numel(size_hints)
 
@@ -432,15 +448,7 @@ class ReductionHeuristic(CodegenConfigHeuristics):
         )
 
         inductor_meta = {} if inductor_meta is None else inductor_meta
-        # Under deterministic mode, canonicalize the batch-dim hint so the
-        # candidate-config branching below (e.g. xnumel // 8 < 128) doesn't pick
-        # a different (XBLOCK, num_warps) for bs=N vs bs=N/2. Different picks
-        # change the bf16 reduction order and break batch invariance in
-        # persistent reductions like LayerNorm.
-        if inductor_meta.get("batch_invariant"):
-            size_hints = dict(size_hints)
-            if "x" in size_hints:
-                size_hints["x"] = max(size_hints["x"], 4096)
+        size_hints = _batch_invariant_size_hints(size_hints, inductor_meta)
 
         xnumel = size_hints["x"]
         rnumel = get_total_reduction_numel(size_hints)
